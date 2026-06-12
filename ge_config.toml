@@ -1,0 +1,111 @@
+[functions]
+0x823751B8 = { size = 8 }
+0x830E0200 = { name = "sub_830E0200" }
+0x830E0460 = { name = "sub_830E0460" }
+0x830E04D0 = { name = "sub_830E04D0" }
+0x830E0560 = { name = "sub_830E0560" }
+0x830E0630 = { name = "sub_830E0630" }
+0x830E0670 = { name = "sub_830E0670" }
+0x830E06B0 = { name = "sub_830E06B0" }
+0x830E0750 = { name = "sub_830E0750" }
+0x82367EF0 = { size = 0x14 }
+0x82173860 = { size = 8 }
+0x82177F88 = { size = 8 }
+0x821A6310 = { size = 8 }
+0x821E5C58 = { size = 16 }
+0x821E5E28 = { size = 40 }
+0x821E5E50 = { size = 40 }
+0x821E5E78 = { size = 40 }
+0x821E5EA0 = { size = 40 }
+0x821E62C8 = { size = 32 }
+0x821E62E8 = { size = 4 }
+0x8223C0A0 = { size = 120 }
+0x82313B00 = { size = 80 }
+0x8236D700 = { size = 16 }
+0x8236DA00 = { size = 24 }
+0x82371058 = { size = 72 }
+0x823710A0 = { size = 56 }
+0x82375B08 = { size = 8 }
+0x82375B10 = { size = 8 }
+0x82375B20 = { size = 8 }
+0x82375B60 = { size = 8 }
+0x82375B68 = { size = 8 }
+0x82376AB8 = { size = 8 }
+0x82377C20 = { size = 8 }
+0x82377C28 = { size = 8 }
+0x82377C38 = { size = 8 }
+0x823BEF08 = { size = 28 }
+0x8209F5F4 = { name = "ge_cont_8209F5F4" }  # F3 continuation (sub_8209F5D8)
+# F1 (0x820F7750) and F4 (0x820C4918) are NOT separate continuations: their
+# hooks use jump_address back into the parent so the loop-back branches resolve.
+0x820C7454 = { name = "ge_cont_820C7454" }  # F5 continuation (sub_820C7390)
+0x820C7430 = { name = "ge_cont_820C7430" }  # F6 continuation (sub_820C7390)
+0x820A3E9C = { name = "ge_cont_820A3E9C" }  # F7 continuation (sub_820A3C20)
+0x820F79F0 = { name = "ge_body_820F79F0" }  # F2 loop body (one r26 iteration)
+0x820F7D0C = { name = "ge_epi_820F7D0C" }   # F2 epilogue (post-loop, returns)
+[[midasm_hook]]
+address = 0x82198C94
+name = "ge_dbg_now"
+registers = ["r9", "r30"]
+after_instruction = true
+[[midasm_hook]]
+address = 0x82199944
+name = "ge_diag_vdswap"
+registers = ["r31", "r30"]
+after_instruction = true
+[[midasm_hook]]
+address = 0x8209F5F0
+name = "ge_hook_830E0670"
+registers = ["r3", "r11", "r28"]
+after_instruction = false
+return = true
+[[midasm_hook]]
+address = 0x820F774C
+name = "ge_hook_830E0630"
+registers = ["r30"]
+after_instruction = false
+jump_address_on_true = 0x820F768C
+jump_address_on_false = 0x820F7760
+[[midasm_hook]]
+address = 0x820C4914
+name = "ge_hook_830E0200"
+registers = ["r31", "r29", "r28", "r11", "r23", "r21"]
+after_instruction = false
+jump_address_on_true = 0x820C485C
+jump_address_on_false = 0x820C4920
+[[midasm_hook]]
+address = 0x820C7450
+name = "ge_hook_830E04D0"
+registers = ["r11", "r10", "r9"]
+after_instruction = false
+return = true
+[[midasm_hook]]
+address = 0x820C742C
+name = "ge_hook_830E0560"
+registers = ["r11", "r10", "r9"]
+after_instruction = false
+return = true
+[[midasm_hook]]
+address = 0x820A3E50
+name = "ge_hook_830E0460"
+registers = ["r11", "r4", "r29", "r7", "r28", "r6", "r31", "r5", "r27", "r3"]
+after_instruction = false
+return = true
+[[midasm_hook]]
+address = 0x820B40E4
+name = "ge_hook_830E0750"
+registers = ["r7", "r8", "r11", "f1"]
+after_instruction = false
+return = true
+[[midasm_hook]]
+address = 0x820F79EC
+name = "ge_f2_driver"
+registers = ["r26"]
+after_instruction = true
+return = true
+[[midasm_hook]]
+address = 0x820F7A2C
+name = "ge_f2_skip"
+registers = ["r3"]
+after_instruction = false
+return_on_true = true

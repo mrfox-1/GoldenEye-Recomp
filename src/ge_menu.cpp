@@ -1,0 +1,538 @@
+// ge - ReXGlue Recompiled Project
+//
+// In-game pause menu implementation. See ge_menu.h.
+//
+// Drawn procedurally for now (flat fills + outlines that approximate the
+// manila-folder briefing screen). Every visual block is marked `// TEXTURE:`
+// so it can be swapped for an ImGui::Image() once the Photoshop art exists --
+// the layout geometry stays the same.
+
+#include "ge_menu.h"
+#include "ge_postfx.h"
+
+#include <rex/cvar.h>
+
+#include <imgui.h>
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+namespace {
+
+// --- Small cvar accessors (the menu reads/writes settings by name) ---
+float GetCvarF(const char* name) {
+  return static_cast<float>(std::atof(rex::cvar::GetFlagByName(name).c_str()));
+}
+void SetCvarF(const char* name, float v) { rex::cvar::SetFlagByName(name, std::to_string(v)); }
+bool GetCvarB(const char* name) { return rex::cvar::GetFlagByName(name) == "true"; }
+void SetCvarB(const char* name, bool v) { rex::cvar::SetFlagByName(name, v ? "true" : "false"); }
+
+// --- Briefing palette (sampled from the reference screenshot) ---
+constexpr ImU32 kFolder = IM_COL32(214, 201, 162, 255);     // manila paper
+constexpr ImU32 kFolderEdge = IM_COL32(120, 108, 78, 255);  // darker rim
+constexpr ImU32 kTab = IM_COL32(196, 184, 146, 255);        // unselected tab
+constexpr ImU32 kTabSel = IM_COL32(224, 213, 176, 255);     // selected tab
+constexpr ImU32 kInk = IM_COL32(52, 44, 32, 255);           // body text
+constexpr ImU32 kInkDim = IM_COL32(92, 82, 60, 255);        // secondary text
+constexpr ImU32 kTitle = IM_COL32(40, 33, 24, 255);         // big serif title
+constexpr ImU32 kReticle = IM_COL32(196, 36, 28, 255);      // red selection crosshair
+constexpr ImU32 kStamp = IM_COL32(176, 42, 34, 70);         // faded CLASSIFIED stamp
+
+struct Tab {
+  const char* label;  // short, drawn vertically on the tab
+  const char* title;  // big serif heading shown in the body
+};
+
+constexpr Tab kTabs[] = {
+    {"AUDIO", "AUDIO"},
+    {"VIDEO", "VIDEO"},
+    {"INPUT", "CONTROLS"},
+    {"ONLINE", "ONLINE"},
+    {"SYSTEM", "SYSTEM"},
+};
+constexpr int kTabCount = static_cast<int>(sizeof(kTabs) / sizeof(kTabs[0]));
+
+// Rotate the glyphs AddText() just appended about `pivot` by `angle` radians.
+void AddTextRotated(ImDrawList* dl, ImFont* font, float size, ImVec2 pos, ImU32 col,
+                    const char* text, float angle, ImVec2 pivot) {
+  int v0 = dl->VtxBuffer.Size;
+  dl->AddText(font, size, pos, col, text);
+  int v1 = dl->VtxBuffer.Size;
+  const float s = std::sin(angle), c = std::cos(angle);
+  for (int i = v0; i < v1; ++i) {
+    ImDrawVert& v = dl->VtxBuffer[i];
+    const float dx = v.pos.x - pivot.x, dy = v.pos.y - pivot.y;
+    v.pos.x = pivot.x + dx * c - dy * s;
+    v.pos.y = pivot.y + dx * s + dy * c;
+  }
+}
+
+// Draw a short label as a centered vertical stack of characters.
+void AddVerticalLabel(ImDrawList* dl, ImFont* font, float size, ImVec2 center, ImU32 col,
+                      const char* text) {
+  const float line_h = size + 1.0f;
+  int n = 0;
+  for (const char* p = text; *p; ++p) ++n;
+  float y = center.y - (n * line_h) * 0.5f;
+  for (const char* p = text; *p; ++p, y += line_h) {
+    char ch[2] = {*p, 0};
+    ImVec2 sz = font->CalcTextSizeA(size, FLT_MAX, 0.0f, ch);
+    dl->AddText(font, size, ImVec2(center.x - sz.x * 0.5f, y), col, ch);
+  }
+}
+
+}  // namespace
+
+GeMenuDialog::GeMenuDialog(rex::ui::ImGuiDrawer* drawer, Callbacks callbacks)
+    : rex::ui::ImGuiDialog(drawer), callbacks_(std::move(callbacks)) {}
+
+GeMenuDialog::~GeMenuDialog() = default;
+
+void GeMenuDialog::RequestClose() { Close(); }
+
+void GeMenuDialog::OnClose() {
+  if (callbacks_.on_closed) callbacks_.on_closed();
+  if (quit_requested_ && callbacks_.on_quit) callbacks_.on_quit();
+}
+
+void GeMenuDialog::OnDraw(ImGuiIO& io) {
+  // Keyboard tab navigation.
+  if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+    selected_tab_ = (selected_tab_ - 1 + kTabCount) % kTabCount;
+  if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+    selected_tab_ = (selected_tab_ + 1) % kTabCount;
+
+  const ImVec2 disp = io.DisplaySize;
+
+  // --- Centered portrait panel (folder body + right-edge tab strip) ---
+  const float folder_h = std::floor(disp.y * 0.82f);
+  const float folder_w = std::floor(folder_h * 0.72f);  // portrait: taller than wide
+  tab_w_ = std::floor(folder_w * 0.13f);
+  const float total_w = folder_w + tab_w_;
+  const ImVec2 origin(std::floor((disp.x - total_w) * 0.5f),
+                      std::floor((disp.y - folder_h) * 0.5f));
+  f0_ = origin;
+  f1_ = ImVec2(origin.x + folder_w, origin.y + folder_h);
+
+  ImGui::SetNextWindowPos(origin);
+  ImGui::SetNextWindowSize(ImVec2(total_w, folder_h));
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+  ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                           ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                           ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground |
+                           ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav;
+  if (!ImGui::Begin("##ge_pause_menu", nullptr, flags)) {
+    ImGui::End();
+    ImGui::PopStyleVar();
+    return;
+  }
+
+  DrawFolder(io);
+  DrawTabs(io);
+  DrawContent(io);
+
+  ImGui::End();
+  ImGui::PopStyleVar();
+}
+
+void GeMenuDialog::DrawFolder(ImGuiIO& /*io*/) {
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 f0 = f0_, f1 = f1_;
+  const float fw = f1.x - f0.x, fh = f1.y - f0.y;
+
+  // Drop shadow.
+  dl->AddRectFilled(ImVec2(f0.x + 10, f0.y + 12), ImVec2(f1.x + 10, f1.y + 12),
+                    IM_COL32(0, 0, 0, 90), 6.0f);
+  // TEXTURE: manila folder body.
+  dl->AddRectFilled(f0, f1, kFolder, 6.0f);
+  dl->AddRect(f0, f1, kFolderEdge, 6.0f, 0, 2.0f);
+
+  // TEXTURE: diagonal CLASSIFIED stamp (behind body content).
+  {
+    const char* stamp = "CLASSIFIED";
+    const float ssize = std::floor(fw * 0.16f);
+    ImVec2 ssz = ImGui::GetFont()->CalcTextSizeA(ssize, FLT_MAX, 0.0f, stamp);
+    ImVec2 spos((f0.x + f1.x) * 0.5f - ssz.x * 0.5f, f0.y + fh * 0.62f - ssz.y * 0.5f);
+    AddTextRotated(dl, ImGui::GetFont(), ssize, spos, kStamp, stamp, -0.5f,
+                   ImVec2((f0.x + f1.x) * 0.5f, f0.y + fh * 0.62f));
+  }
+}
+
+void GeMenuDialog::DrawTabs(ImGuiIO& /*io*/) {
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 f0 = f0_, f1 = f1_;
+  const float fh = f1.y - f0.y;
+  const float folder_right = f1.x;
+
+  const float strip_top = f0.y + std::floor(fh * 0.10f);
+  const float gap = std::floor(fh * 0.025f);
+  const float tab_h = std::floor((f1.y - strip_top - gap * (kTabCount - 1)) / kTabCount);
+  const float label_size = std::floor(tab_w_ * 0.32f);
+
+  for (int i = 0; i < kTabCount; ++i) {
+    const float ty0 = strip_top + i * (tab_h + gap);
+    const float ty1 = ty0 + tab_h;
+    const bool sel = (i == selected_tab_);
+    // Selected tab overlaps the folder edge so it reads as the open page.
+    const float left = sel ? folder_right - 4.0f : folder_right + 3.0f;
+    const float right = folder_right + tab_w_;
+    const ImVec2 t0(left, ty0), t1(right, ty1);
+
+    if (ImGui::IsMouseHoveringRect(t0, t1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+      selected_tab_ = i;
+
+    // TEXTURE: tab (selected vs unselected).
+    dl->AddRectFilled(t0, t1, sel ? kTabSel : kTab, 5.0f, ImDrawFlags_RoundCornersRight);
+    dl->AddRect(t0, t1, kFolderEdge, 5.0f, ImDrawFlags_RoundCornersRight, 1.5f);
+
+    AddVerticalLabel(dl, ImGui::GetFont(), label_size,
+                     ImVec2((left + right) * 0.5f + (sel ? 2.0f : 0.0f), (ty0 + ty1) * 0.5f), kInk,
+                     kTabs[i].label);
+
+    // TEXTURE: red reticle next to the selected tab.
+    if (sel) {
+      const ImVec2 c(folder_right - 16.0f, (ty0 + ty1) * 0.5f);
+      const float r = 8.0f;
+      dl->AddCircle(c, r, kReticle, 16, 2.0f);
+      dl->AddLine(ImVec2(c.x - r - 4, c.y), ImVec2(c.x + r + 4, c.y), kReticle, 2.0f);
+      dl->AddLine(ImVec2(c.x, c.y - r - 4), ImVec2(c.x, c.y + r + 4), kReticle, 2.0f);
+    }
+  }
+}
+
+void GeMenuDialog::DrawContent(ImGuiIO& /*io*/) {
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const ImVec2 f0 = f0_, f1 = f1_;
+  const float fw = f1.x - f0.x, fh = f1.y - f0.y;
+
+  const float pad = std::floor(fw * 0.08f);
+  const float title_size = std::floor(fh * 0.065f);
+
+  // TEXTURE: big serif section title (top-left).
+  dl->AddText(ImGui::GetFont(), title_size, ImVec2(f0.x + pad, f0.y + pad * 0.7f), kTitle,
+              kTabs[selected_tab_].title);
+  const float rule_y = f0.y + pad * 0.7f + title_size + 6.0f;
+  dl->AddLine(ImVec2(f0.x + pad, rule_y), ImVec2(f1.x - pad, rule_y), kInkDim, 2.0f);
+
+  // --- Interactive content per tab ---
+  ImGui::PushStyleColor(ImGuiCol_Text, kInk);
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(180, 168, 132, 255));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(190, 178, 142, 255));
+  ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(170, 158, 122, 255));
+  ImGui::PushStyleColor(ImGuiCol_SliderGrab, kReticle);
+  ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, IM_COL32(220, 60, 50, 255));
+  ImGui::PushStyleColor(ImGuiCol_CheckMark, kReticle);
+  ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(180, 168, 132, 255));
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(198, 186, 150, 255));
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(166, 154, 118, 255));
+  // Dropdown popups: a panel slightly darker than the folder, so the dark ink
+  // text stays readable (ImGui's default popup background is near-black).
+  ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(190, 178, 140, 255));
+  ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(168, 150, 104, 255));
+  ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(184, 162, 112, 255));
+  ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(160, 138, 96, 255));
+  // Scrollbars (in the dropdown popups and the content panel) -- dark on tan so
+  // they're actually visible and grabbable.
+  ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, IM_COL32(172, 160, 124, 200));
+  ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, IM_COL32(118, 102, 70, 255));
+  ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, IM_COL32(140, 122, 84, 255));
+  ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, IM_COL32(96, 82, 56, 255));
+
+  // Enlarge the interactive content (text + widgets). Tabs/title are drawn via
+  // the draw list with explicit sizes, so they are unaffected by this scale.
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 8.0f));
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(14.0f, 14.0f));
+
+  const ImVec2 content_pos(f0.x + pad, rule_y + std::floor(fh * 0.05f));
+  const float content_w = (f1.x - pad) - content_pos.x;
+  const float content_h = (f1.y - std::floor(fh * 0.11f)) - content_pos.y;
+  ImGui::SetCursorScreenPos(content_pos);
+  ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
+  // Scrollable so longer tabs (e.g. Post-FX) fit the portrait folder.
+  ImGui::BeginChild("##gecontent", ImVec2(content_w, content_h), false,
+                    ImGuiWindowFlags_NoBackground);
+  ImGui::SetWindowFontScale(1.5f);
+  ImGui::PushItemWidth(content_w * 0.62f);
+
+  switch (selected_tab_) {
+    case 0:  // AUDIO
+      ImGui::SliderFloat("Master Volume", &vol_master_, 0.0f, 1.0f, "%.2f");
+      ImGui::SliderFloat("Music", &vol_music_, 0.0f, 1.0f, "%.2f");
+      ImGui::SliderFloat("Sound FX", &vol_sfx_, 0.0f, 1.0f, "%.2f");
+      ImGui::Spacing();
+      ImGui::TextColored(ImColor(kInkDim), "(preview - engine wiring WIP)");
+      break;
+    case 1: {  // VIDEO
+      // --- Fullscreen (live; the request is applied deferred, off the paint
+      //     thread, so the surface is never torn down mid-frame) ---
+      bool fs = callbacks_.get_fullscreen
+                    ? callbacks_.get_fullscreen()
+                    : (rex::cvar::GetFlagByName("fullscreen") == "true");
+      if (ImGui::Checkbox("Fullscreen", &fs)) {
+        if (callbacks_.request_fullscreen) callbacks_.request_fullscreen(fs);
+        rex::cvar::SetFlagByName("fullscreen", fs ? "true" : "false");
+        if (callbacks_.persist_config) callbacks_.persist_config();
+      }
+
+      // --- V-Sync (live; the GPU vsync worker reads this each frame) ---
+      bool vsync = rex::cvar::GetFlagByName("vsync") == "true";
+      if (ImGui::Checkbox("V-Sync", &vsync)) {
+        rex::cvar::SetFlagByName("vsync", vsync ? "true" : "false");
+        if (callbacks_.persist_config) callbacks_.persist_config();
+      }
+
+      // --- Frame limit. NOTE: GoldenEye renders internally at 60Hz, so values
+      //     above 60 are clamped to 60 by the vblank worker (driving it faster
+      //     floods the guest interrupt and freezes the picture). Listed anyway
+      //     per request; >60 simply stays 60. ---
+      static const struct { const char* label; const char* value; } kFps[] = {
+          {"30 FPS", "30"},   {"60 FPS", "60"},   {"90 FPS", "90"},
+          {"120 FPS", "120"}, {"144 FPS", "144"}, {"165 FPS", "165"},
+          {"180 FPS", "180"}, {"240 FPS", "240"}, {"300 FPS", "300"},
+          {"Uncapped", "0"}};
+      const std::string cur_fps = rex::cvar::GetFlagByName("max_fps");
+      int fps_idx = 0;
+      for (int i = 0; i < IM_ARRAYSIZE(kFps); ++i)
+        if (cur_fps == kFps[i].value) fps_idx = i;
+      ImGui::BeginDisabled(vsync);
+      ImGui::SetNextWindowSizeConstraints(
+          ImVec2(0, 0), ImVec2(FLT_MAX, ImGui::GetFrameHeightWithSpacing() * 6.0f));
+      if (ImGui::BeginCombo("Frame Limit", vsync ? "V-Synced" : kFps[fps_idx].label)) {
+        for (int i = 0; i < IM_ARRAYSIZE(kFps); ++i) {
+          bool sel = (i == fps_idx);
+          if (ImGui::Selectable(kFps[i].label, sel)) {
+            rex::cvar::SetFlagByName("max_fps", kFps[i].value);
+            if (callbacks_.persist_config) callbacks_.persist_config();
+          }
+          if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+      }
+      ImGui::EndDisabled();
+
+      // --- GPU throttle. Pauses the emulated GPU command worker after each ring
+      //     drain so it can't outrun the render thread -- the cause of the
+      //     intermittent picture freeze. Higher = fewer freezes but more input
+      //     latency; lower = snappier but more freeze risk; 0 = off. Applied
+      //     live (the CP worker reads it each drain); saved to ge.toml on
+      //     release. This is the supported way to tune it -- editing ge.toml by
+      //     hand is fragile because the game rewrites the file on every save. ---
+      int throttle_us = std::atoi(rex::cvar::GetFlagByName("ge_gpu_throttle_us").c_str());
+      if (ImGui::SliderInt("GPU Throttle (us)", &throttle_us, 0, 500)) {
+        if (throttle_us < 0) throttle_us = 0;
+        rex::cvar::SetFlagByName("ge_gpu_throttle_us", std::to_string(throttle_us));
+      }
+      if (ImGui::IsItemDeactivatedAfterEdit() && callbacks_.persist_config)
+        callbacks_.persist_config();
+      ImGui::TextColored(ImColor(kInkDim),
+                         "(fixes picture freeze; higher = fewer freezes, more lag)");
+
+      ImGui::Spacing();
+      ImGui::Separator();
+      ImGui::Spacing();
+
+      // --- Resolution (window size; applied on restart) ---
+      static const struct { const char* label; const char* w; const char* h; } kRes[] = {
+          {"1280 x 720", "1280", "720"},   {"1600 x 900", "1600", "900"},
+          {"1920 x 1080", "1920", "1080"}, {"2560 x 1440", "2560", "1440"},
+          {"3840 x 2160", "3840", "2160"}};
+      const std::string cur_w = rex::cvar::GetFlagByName("window_width");
+      int res_idx = 0;
+      for (int i = 0; i < IM_ARRAYSIZE(kRes); ++i)
+        if (cur_w == kRes[i].w) res_idx = i;
+      ImGui::SetNextWindowSizeConstraints(
+          ImVec2(0, 0), ImVec2(FLT_MAX, ImGui::GetFrameHeightWithSpacing() * 6.0f));
+      if (ImGui::BeginCombo("Resolution", kRes[res_idx].label)) {
+        for (int i = 0; i < IM_ARRAYSIZE(kRes); ++i) {
+          bool sel = (i == res_idx);
+          if (ImGui::Selectable(kRes[i].label, sel)) {
+            rex::cvar::SetFlagByName("window_width", kRes[i].w);
+            rex::cvar::SetFlagByName("window_height", kRes[i].h);
+            if (callbacks_.persist_config) callbacks_.persist_config();
+          }
+          if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+      }
+      ImGui::TextColored(ImColor(kInkDim), "(resolution applies after restart)");
+
+      ImGui::Spacing();
+      ImGui::Separator();
+      ImGui::Spacing();
+
+      // --- Post-FX (live full-screen filter; see ge_postfx) ---
+      ImGui::TextColored(ImColor(kTitle), "POST-FX");
+      bool pfx_on = GetCvarB("postfx_enabled");
+      if (ImGui::Checkbox("Enable Post-FX", &pfx_on)) {
+        SetCvarB("postfx_enabled", pfx_on);
+        if (callbacks_.persist_config) callbacks_.persist_config();
+      }
+
+      ImGui::SetNextWindowSizeConstraints(
+          ImVec2(0, 0), ImVec2(FLT_MAX, ImGui::GetFrameHeightWithSpacing() * 6.0f));
+      if (ImGui::BeginCombo("Preset", "Apply preset...")) {
+        for (int i = 0; i < ge::PostFxPresetCount(); ++i) {
+          if (ImGui::Selectable(ge::PostFxPresetName(i))) ge::ApplyPostFxPreset(i);
+        }
+        ImGui::EndCombo();
+      }
+
+      ImGui::BeginDisabled(!pfx_on);
+      {
+        float b = GetCvarF("postfx_brightness");
+        if (ImGui::SliderFloat("Brightness", &b, -1.0f, 1.0f, "%.2f"))
+          SetCvarF("postfx_brightness", b);
+
+        float con = GetCvarF("postfx_contrast");
+        if (ImGui::SliderFloat("Contrast", &con, 0.0f, 2.0f, "%.2f"))
+          SetCvarF("postfx_contrast", con);
+
+        float sat = GetCvarF("postfx_saturation");
+        if (ImGui::SliderFloat("Saturation", &sat, 0.0f, 2.0f, "%.2f"))
+          SetCvarF("postfx_saturation", sat);
+
+        float vib = GetCvarF("postfx_vibrance");
+        if (ImGui::SliderFloat("Vibrance", &vib, -1.0f, 1.0f, "%.2f"))
+          SetCvarF("postfx_vibrance", vib);
+
+        float temp = GetCvarF("postfx_temperature");
+        if (ImGui::SliderFloat("Temperature", &temp, -1.0f, 1.0f, "%.2f"))
+          SetCvarF("postfx_temperature", temp);
+
+        float gam = GetCvarF("postfx_gamma");
+        if (ImGui::SliderFloat("Gamma", &gam, 0.3f, 3.0f, "%.2f")) SetCvarF("postfx_gamma", gam);
+
+        float tint[3] = {GetCvarF("postfx_tint_r"), GetCvarF("postfx_tint_g"),
+                         GetCvarF("postfx_tint_b")};
+        if (ImGui::ColorEdit3("Tint Colour", tint, ImGuiColorEditFlags_NoInputs)) {
+          SetCvarF("postfx_tint_r", tint[0]);
+          SetCvarF("postfx_tint_g", tint[1]);
+          SetCvarF("postfx_tint_b", tint[2]);
+        }
+        float ts = GetCvarF("postfx_tint");
+        if (ImGui::SliderFloat("Tint Strength", &ts, 0.0f, 1.0f, "%.2f"))
+          SetCvarF("postfx_tint", ts);
+
+        float vig = GetCvarF("postfx_vignette");
+        if (ImGui::SliderFloat("Vignette", &vig, 0.0f, 1.0f, "%.2f"))
+          SetCvarF("postfx_vignette", vig);
+
+        float scan = GetCvarF("postfx_scanlines");
+        if (ImGui::SliderFloat("Scanlines", &scan, 0.0f, 1.0f, "%.2f"))
+          SetCvarF("postfx_scanlines", scan);
+      }
+      ImGui::EndDisabled();
+
+      ImGui::Spacing();
+      if (ImGui::Button("Save Look")) {
+        if (callbacks_.persist_config) callbacks_.persist_config();
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Reset to Default")) {
+        ge::ResetPostFx();
+        if (callbacks_.persist_config) callbacks_.persist_config();
+      }
+      break;
+    }
+    case 2:  // CONTROLS
+      ImGui::TextWrapped("Movement, aim and fire use the gamepad or the bound keyboard keys.");
+      ImGui::Spacing();
+      ImGui::BulletText("Pause / this menu: ESC");
+      ImGui::BulletText("Freeze-frame: F1");
+      ImGui::BulletText("Rebind keys: F4");
+      break;
+    case 3: {  // ONLINE
+      // Load the cvars into the edit buffers once, the first time the tab opens
+      // (so typing doesn't fight a per-frame reload).
+      if (!online_loaded_) {
+        online_loaded_ = true;
+        std::snprintf(username_buf_, sizeof(username_buf_), "%s",
+                      rex::cvar::GetFlagByName("ge_username").c_str());
+        std::snprintf(server_buf_, sizeof(server_buf_), "%s",
+                      rex::cvar::GetFlagByName("ge_online_server").c_str());
+        online_enable_ = GetCvarB("ge_online_enable");
+        online_port_ = std::atoi(rex::cvar::GetFlagByName("ge_online_port").c_str());
+        if (online_port_ <= 0 || online_port_ > 65535) online_port_ = 31000;
+      }
+
+      ImGui::TextWrapped(
+          "Play with friends over a shared server. One person runs the server "
+          "(GoldeneyeServer -- see DEPLOY.md) and shares its address; everyone "
+          "enters that same address here.");
+      ImGui::Spacing();
+      ImGui::Separator();
+      ImGui::Spacing();
+
+      ImGui::TextColored(ImColor(kInk), "Username");
+      ImGui::SetNextItemWidth(content_w * 0.85f);
+      ImGui::InputText("##ge_user", username_buf_, sizeof(username_buf_));
+      ImGui::TextColored(ImColor(kInkDim), "(shown to other players, max 15 characters)");
+      ImGui::Spacing();
+
+      ImGui::TextColored(ImColor(kInk), "Server address");
+      ImGui::SetNextItemWidth(content_w * 0.85f);
+      ImGui::InputText("##ge_server", server_buf_, sizeof(server_buf_));
+      ImGui::TextColored(ImColor(kInkDim),
+                         "(IP or hostname -- your own server, or a playit.gg / Hamachi address)");
+      ImGui::Spacing();
+
+      ImGui::TextColored(ImColor(kInk), "Server port");
+      ImGui::SetNextItemWidth(content_w * 0.85f);
+      ImGui::InputInt("##ge_port", &online_port_, 0, 0);  // 0,0 = no +/- step buttons
+      ImGui::TextColored(ImColor(kInkDim), "(must match the port the host started the server with)");
+      ImGui::Spacing();
+
+      ImGui::Checkbox("Enable online play", &online_enable_);
+      ImGui::Spacing();
+      ImGui::Separator();
+      ImGui::Spacing();
+
+      const ImVec2 obsize(content_w * 0.85f, std::floor(fh * 0.07f));
+      const bool empty_name = username_buf_[0] == '\0';
+      if (empty_name) ImGui::BeginDisabled();
+      if (ImGui::Button("SAVE & RESTART", obsize)) {
+        const int sp = (online_port_ > 0 && online_port_ <= 65535) ? online_port_ : 31000;
+        rex::cvar::SetFlagByName("ge_username", username_buf_);
+        rex::cvar::SetFlagByName("ge_online_server",
+                                 server_buf_[0] ? server_buf_ : "127.0.0.1");
+        rex::cvar::SetFlagByName("ge_online_port", std::to_string(sp));
+        SetCvarB("ge_online_enable", online_enable_);
+        if (callbacks_.persist_config) callbacks_.persist_config();
+        if (callbacks_.request_restart) callbacks_.request_restart();
+      }
+      if (empty_name) ImGui::EndDisabled();
+      ImGui::TextColored(ImColor(kInkDim),
+                         "(the game restarts to apply name, server & port changes)");
+      break;
+    }
+    case 4:  // SYSTEM
+    default: {
+      const ImVec2 bsize(content_w * 0.85f, std::floor(fh * 0.07f));
+      if (ImGui::Button("RESUME GAME", bsize)) {
+        Close();
+      }
+      ImGui::Spacing();
+      if (ImGui::Button("QUIT TO DESKTOP", bsize)) {
+        quit_requested_ = true;
+        Close();
+      }
+      break;
+    }
+  }
+
+  ImGui::PopItemWidth();
+  ImGui::SetWindowFontScale(1.0f);
+  ImGui::EndChild();
+  ImGui::PopStyleColor();  // ChildBg
+  ImGui::PopStyleVar(2);
+
+  // Footer hint.
+  ImGui::SetWindowFontScale(1.25f);
+  ImGui::SetCursorScreenPos(ImVec2(f0.x + pad, f1.y - std::floor(fh * 0.06f)));
+  ImGui::TextColored(ImColor(kInkDim), "Up/Down or click a tab  -  ESC to close");
+  ImGui::SetWindowFontScale(1.0f);
+
+  ImGui::PopStyleColor(18);
+}
