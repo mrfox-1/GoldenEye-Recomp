@@ -7,7 +7,7 @@ the game runs as a real native executable.
 
 > [!IMPORTANT]
 > **This repository contains _no_ game code or assets.** It is only the
-> hand-written source that wraps the game (menus, hooks, online, post-FX, build
+> source that wraps the game (menus, hooks, online, post-FX, build
 > config). The recompiled game itself is generated on *your* machine from *your
 > own legally-obtained copy* of GoldenEye 007. You must own the game.
 
@@ -69,7 +69,7 @@ cmake --preset win-amd64-relwithdebinfo -DREXSDK_DIR=/path/to/GoldenEye-Recomp-r
 cmake --build --preset win-amd64-relwithdebinfo
 ```
 
-The hand-written source lives in [`src/`](src/):
+source lives in [`src/`](src/):
 `ge_app` (app + window/menus glue), `ge_menu` (pause/settings menu),
 `ge_hooks` (mid-asm fixups), `ge_postfx` (filters). `ge_manifest.toml` /
 `ge_config.toml` drive the recompiler.
