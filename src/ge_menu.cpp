@@ -257,13 +257,22 @@ void GeMenuDialog::DrawContent(ImGuiIO& /*io*/) {
   ImGui::PushItemWidth(content_w * 0.62f);
 
   switch (selected_tab_) {
-    case 0:  // AUDIO
-      ImGui::SliderFloat("Master Volume", &vol_master_, 0.0f, 1.0f, "%.2f");
-      ImGui::SliderFloat("Music", &vol_music_, 0.0f, 1.0f, "%.2f");
-      ImGui::SliderFloat("Sound FX", &vol_sfx_, 0.0f, 1.0f, "%.2f");
+    case 0: {  // AUDIO
+      // Master volume -- live: the SDL mixer reads master_volume each callback,
+      // so the slider is audible immediately. Persisted to ge.toml on release
+      // (mouse-up) so it survives a restart.
+      float vol = GetCvarF("master_volume");
+      if (ImGui::SliderFloat("Master Volume", &vol, 0.0f, 1.0f, "%.2f")) {
+        if (vol < 0.0f) vol = 0.0f;
+        if (vol > 1.0f) vol = 1.0f;
+        SetCvarF("master_volume", vol);
+      }
+      if (ImGui::IsItemDeactivatedAfterEdit() && callbacks_.persist_config)
+        callbacks_.persist_config();
       ImGui::Spacing();
-      ImGui::TextColored(ImColor(kInkDim), "(preview - engine wiring WIP)");
+      ImGui::TextColored(ImColor(kInkDim), "(applies instantly)");
       break;
+    }
     case 1: {  // VIDEO
       // --- Fullscreen (live; the request is applied deferred, off the paint
       //     thread, so the surface is never torn down mid-frame) ---
@@ -333,30 +342,64 @@ void GeMenuDialog::DrawContent(ImGuiIO& /*io*/) {
       ImGui::Separator();
       ImGui::Spacing();
 
-      // --- Resolution (window size; applied on restart) ---
-      static const struct { const char* label; const char* w; const char* h; } kRes[] = {
-          {"1280 x 720", "1280", "720"},   {"1600 x 900", "1600", "900"},
-          {"1920 x 1080", "1920", "1080"}, {"2560 x 1440", "2560", "1440"},
-          {"3840 x 2160", "3840", "2160"}};
-      const std::string cur_w = rex::cvar::GetFlagByName("window_width");
-      int res_idx = 0;
-      for (int i = 0; i < IM_ARRAYSIZE(kRes); ++i)
-        if (cur_w == kRes[i].w) res_idx = i;
+      // --- Internal resolution (supersampling). This is the resolution the 3D
+      //     scene is actually rendered at, independent of the window size: the
+      //     game's native 1280x720 surfaces are scaled by an integer factor and
+      //     downsampled to the window. Driven by the engine's resolution_scale
+      //     cvar (1x/2x/3x/4x). It is kRequiresRestart, so the choice is written
+      //     now and the render targets are rebuilt at this size on next launch.
+      //     1080p is intentionally absent: 720p x 1.5 is not an integer scale,
+      //     and only integer supersampling is guaranteed to change render res. ---
+      static const struct { const char* label; const char* scale; } kIRes[] = {
+          {"720p (native, 1x)", "1"},
+          {"1440p / 2K (2x)", "2"},
+          {"2160p / 4K (3x)", "3"},
+          {"2880p (4x)", "4"}};
+      const std::string cur_scale = rex::cvar::GetFlagByName("resolution_scale");
+      int ires_idx = 0;
+      for (int i = 0; i < IM_ARRAYSIZE(kIRes); ++i)
+        if (cur_scale == kIRes[i].scale) ires_idx = i;
       ImGui::SetNextWindowSizeConstraints(
           ImVec2(0, 0), ImVec2(FLT_MAX, ImGui::GetFrameHeightWithSpacing() * 6.0f));
-      if (ImGui::BeginCombo("Resolution", kRes[res_idx].label)) {
-        for (int i = 0; i < IM_ARRAYSIZE(kRes); ++i) {
-          bool sel = (i == res_idx);
-          if (ImGui::Selectable(kRes[i].label, sel)) {
-            rex::cvar::SetFlagByName("window_width", kRes[i].w);
-            rex::cvar::SetFlagByName("window_height", kRes[i].h);
+      if (ImGui::BeginCombo("Internal Resolution", kIRes[ires_idx].label)) {
+        for (int i = 0; i < IM_ARRAYSIZE(kIRes); ++i) {
+          bool sel = (i == ires_idx);
+          if (ImGui::Selectable(kIRes[i].label, sel)) {
+            rex::cvar::SetFlagByName("resolution_scale", kIRes[i].scale);
             if (callbacks_.persist_config) callbacks_.persist_config();
           }
           if (sel) ImGui::SetItemDefaultFocus();
         }
         ImGui::EndCombo();
       }
-      ImGui::TextColored(ImColor(kInkDim), "(resolution applies after restart)");
+      ImGui::TextColored(ImColor(kInkDim),
+                         "(renders the 3D scene at this resolution; applies after restart)");
+
+      ImGui::Spacing();
+
+      // --- Graphics API. "Auto" detects the GPU at boot: AMD -> Vulkan (the
+      //     D3D12 path times out / black-screens on AMD for this title), all
+      //     others -> Direct3D 12. Override here if needed; applied on restart. ---
+      static const struct { const char* label; const char* value; } kApi[] = {
+          {"Auto (recommended)", "auto"}, {"Direct3D 12", "d3d12"}, {"Vulkan", "vulkan"}};
+      const std::string cur_api = rex::cvar::GetFlagByName("gpu");
+      int api_idx = 0;
+      for (int i = 0; i < IM_ARRAYSIZE(kApi); ++i)
+        if (cur_api == kApi[i].value) api_idx = i;
+      ImGui::SetNextWindowSizeConstraints(
+          ImVec2(0, 0), ImVec2(FLT_MAX, ImGui::GetFrameHeightWithSpacing() * 6.0f));
+      if (ImGui::BeginCombo("Graphics API", kApi[api_idx].label)) {
+        for (int i = 0; i < IM_ARRAYSIZE(kApi); ++i) {
+          bool sel = (i == api_idx);
+          if (ImGui::Selectable(kApi[i].label, sel)) {
+            rex::cvar::SetFlagByName("gpu", kApi[i].value);
+            if (callbacks_.persist_config) callbacks_.persist_config();
+          }
+          if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+      }
+      ImGui::TextColored(ImColor(kInkDim), "(AMD uses Vulkan automatically; applies after restart)");
 
       ImGui::Spacing();
       ImGui::Separator();

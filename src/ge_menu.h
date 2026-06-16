@@ -64,11 +64,6 @@ class GeMenuDialog : public rex::ui::ImGuiDialog {
   ImVec2 f1_{};      // folder body bottom-right
   float tab_w_ = 0;  // width of the right-edge tab strip
 
-  // Placeholder audio state (engine wiring comes later).
-  float vol_master_ = 0.80f;
-  float vol_music_ = 0.70f;
-  float vol_sfx_ = 0.85f;
-
   // ONLINE tab edit state, loaded from the cvars the first time the tab shows
   // (so typing doesn't fight a per-frame reload). Applied on Save & Restart.
   bool online_loaded_ = false;
