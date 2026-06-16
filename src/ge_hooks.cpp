@@ -674,6 +674,9 @@ constexpr float kPitchPerCount = 0.10f;      // guest pitch (+612) units per mou
 constexpr float kPitchMin = -60.0f;
 constexpr float kPitchMax = 60.0f;
 constexpr uint32_t GE_BONDVIEW_CUR = 0x82F1FAACu; // dword_82F1FAAC -> current bondview struct
+constexpr uint32_t GE_CUTSCENE = 0x82F1F8DCu;     // gBondViewCutscene ptr; non-zero = cutscene/non-playable
+constexpr uint32_t GE_CAMERA_MODE = 0x82F1F920u;  // g_CameraMode (getter sub_820B0268). 1/2/3=intro fly-in, 4=FP playable
+constexpr uint32_t GE_CAM_FP = 4u;                // first-person playable mode (only state the player aims)
 constexpr uint32_t GE_BV_YAW = 596u;              // +596 facing yaw (degrees, HUD/radar copy)
 constexpr uint32_t GE_BV_PITCH = 612u;            // +612 pitch angle
 constexpr uint32_t GE_BV_CENTER_FLAG = 524u;      // +524 auto-center-this-frame flag
@@ -896,7 +899,19 @@ void ge_mouselook_pitch(PPCRegister& /*r11*/) {
   uint32_t bv = LD32(base, GE_BONDVIEW_CUR);
   if (!bv) return;
 
-  if (!ge_mouselook_on()) return;
+  // Suspend mouse-look whenever the player isn't in first-person control:
+  //   * g_CameraMode != FP  -> level-start intro fly-in (modes 1/2/3), swirl,
+  //     death cam, ending pose, fade-to-title, etc. (confirmed: gameplay = 4).
+  //   * gBondViewCutscene   -> a scripted camera has taken over mid-level while
+  //     still in FP mode.
+  // Clear g_look_bv so the view re-syncs to the game's angle when control returns
+  // (no snap) instead of our look fighting the scripted/intro camera (which reads
+  // the same heading globals).
+  if (!ge_mouselook_on() || LD32(base, GE_CAMERA_MODE) != GE_CAM_FP ||
+      LD32(base, GE_CUTSCENE) != 0) {
+    g_look_bv = 0;
+    return;
+  }
 
   float game_yaw = LDF32(base, bv + GE_BV_YAW);
   float game_pitch = LDF32(base, bv + GE_BV_PITCH);
@@ -959,6 +974,10 @@ void ge_pitch_hold(PPCRegister& /*r11*/) {
 void ge_no_autolevel(PPCRegister& /*r11*/) {
   if (!ge_mouselook_on()) return;
   PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  // Only defeat auto-level while the player is in FP control; the intro fly-in
+  // (g_CameraMode 1/2/3) also runs ge_bondview_control via the cinema path.
+  if (LD32(base, GE_CAMERA_MODE) != GE_CAM_FP) return;
+  if (LD32(base, GE_CUTSCENE) != 0) return;  // leave native behaviour in cutscenes
   uint32_t bv = LD32(base, GE_BONDVIEW_CUR);
   if (bv) ST32(base, bv + GE_BV_CENTER_FLAG, 0u);
 }
