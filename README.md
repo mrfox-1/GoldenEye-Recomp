@@ -13,8 +13,6 @@ the game runs as a real native executable.
 > config). You must find the game files yourself. This game never released publically
 
 ## Features
-
-- Runs natively on Windows — no emulator, no BIOS.
 - Controller support.
 - **Online multiplayer** — host or join matches over the internet (LAN, Hamachi,
   playit.gg, or a public server). See [Playing online](#playing-online).
@@ -23,6 +21,7 @@ the game runs as a real native executable.
 - **Post-FX** filters (brightness, contrast, saturation, vignette, presets…).
 - Smooth, stable 60 FPS (recompiled, with GPU-pacing fixes for the original's
   frame timing).
+- Full keyboard and mouse support! Disable it in the "ESC" menu under Inputs.
 
 ## Download & Play
 
