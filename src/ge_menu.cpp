@@ -579,6 +579,21 @@ void GeMenuDialog::DrawContent(ImGuiIO& /*io*/) {
       ImGui::Spacing();
       ImGui::Separator();
       ImGui::Spacing();
+      ImGui::TextColored(ImColor(kTitle), "DEBUG");
+      ImGui::Spacing();
+      // Hidden debug menu (TCRF). Live: the enable gate reads this cvar each
+      // frame, so no restart -- toggle here, then press LB in-game to open it.
+      bool dbg = GetCvarB("ge_debug_menu");
+      if (ImGui::Checkbox("Debug Menu", &dbg)) {
+        SetCvarB("ge_debug_menu", dbg);
+        if (callbacks_.persist_config) callbacks_.persist_config();
+      }
+      ImGui::TextColored(ImColor(kInkDim),
+                         "(press LB in-game to open it; the game freezes while it's up)");
+
+      ImGui::Spacing();
+      ImGui::Separator();
+      ImGui::Spacing();
 
       ImGui::TextColored(ImColor(kTitle), "REBIND KEYS");
       ImGui::TextColored(ImColor(kInkDim), "(click a binding, then press the new key; Esc cancels)");

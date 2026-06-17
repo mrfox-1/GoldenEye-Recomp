@@ -553,6 +553,24 @@ bool ge_hook_830E0630(PPCRegister& r30) {
   return r30.s32 < 8;
 }
 
+// --- Hidden debug menu (TCRF: set byte 0x82189F2B 0x0F->0x00) ----------------
+// In sub_821898D0: r30 = button mask, r11 = r30 & 0x100 (LB / LSHOULDER), then
+//   0x82189F28  cmplwi cr6, r11, 0xF      ; r11 is only ever 0 or 0x100
+//   0x82189F2C  beq    cr6, 0x82189F4C    ; so EQ never true -> dead branch
+//   0x82189F30  ...LB-> debug-menu toggle handler (runs every frame in retail)
+// Setting the 0xF immediate to 0 makes the compare "r11 == 0", so the beq is
+// taken when LB is UP and the handler runs only when LB is PRESSED == LB toggles
+// the debug menu. The recomp runs generated code (can't patch the byte), so we
+// replace the branch decision here and read it live from a cvar (no restart).
+//   debug ON : take branch (skip handler) iff LB up  -> handler fires on LB
+//   debug OFF: never take branch                     -> identical to retail
+// Hooked at 0x82189F2C with jump_on_true=0x82189F4C, jump_on_false=0x82189F30.
+REXCVAR_DEFINE_BOOL(ge_debug_menu, false, "Input",
+                    "Enable the hidden debug menu (press LB in-game to toggle it)");
+bool ge_debug_gate(PPCRegister& r30) {
+  return REXCVAR_GET(ge_debug_menu) && ((r30.u32 & 0x100u) == 0u);
+}
+
 // F2  sub_820F7968: r26 0..8 loop. sub_820F7968 = prologue only (codegen sets
 // constants + r26=0). ge_f2_driver fires after the last prologue instruction
 // (0x820F79EC, after, return) and drives the loop:
