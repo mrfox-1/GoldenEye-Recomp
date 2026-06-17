@@ -49,6 +49,14 @@ If you want to build from source you'll need:
 * Python 3
 * Your own game files
 
+## Known Issues
+
+* AMD GPUs may crash or fail to boot the game.
+* AMD compatibility is currently being worked on.
+
+Please report any issues you find.
+
+
 ## Legal
 
 This repository does not contain any game assets, game code, ROMs, XEX files, textures, audio, or other copyrighted material.
