@@ -674,6 +674,14 @@ constexpr float kPitchPerCount = 0.10f;      // guest pitch (+612) units per mou
 constexpr float kPitchMin = -60.0f;
 constexpr float kPitchMax = 60.0f;
 constexpr uint32_t GE_BONDVIEW_CUR = 0x82F1FAACu; // dword_82F1FAAC -> current bondview struct
+// Index of the bondview currently being processed (sub_820C9B40 sets
+// ge_bondview_cur = ge_bondview_players[idx]; dword_82F1FC70 = idx). 0 = the
+// local/primary player. Single-player stays 0; multiplayer iterates every
+// player's view each frame, so the look hooks must only act on view 0 (the
+// local player -- keyboard/mouse-buttons are injected into pad slot 0). Acting
+// on the other views drained the mouse delta and thrashed g_look_bv, which is
+// what made online look choppy (issue #41).
+constexpr uint32_t GE_VIEW_INDEX = 0x82F1FC70u;   // dword_82F1FC70 current view index
 constexpr uint32_t GE_CUTSCENE = 0x82F1F8DCu;     // gBondViewCutscene ptr; non-zero = cutscene/non-playable
 constexpr uint32_t GE_CAMERA_MODE = 0x82F1F920u;  // g_CameraMode (getter sub_820B0268). 1/2/3=intro fly-in, 4=FP playable
 constexpr uint32_t GE_CAM_FP = 4u;                // first-person playable mode (only state the player aims)
@@ -899,16 +907,46 @@ void ge_mouselook_pitch(PPCRegister& /*r11*/) {
   uint32_t bv = LD32(base, GE_BONDVIEW_CUR);
   if (!bv) return;
 
-  // Suspend mouse-look whenever the player isn't in first-person control:
-  //   * g_CameraMode != FP  -> level-start intro fly-in (modes 1/2/3), swirl,
-  //     death cam, ending pose, fade-to-title, etc. (confirmed: gameplay = 4).
-  //   * gBondViewCutscene   -> a scripted camera has taken over mid-level while
-  //     still in FP mode.
-  // Clear g_look_bv so the view re-syncs to the game's angle when control returns
-  // (no snap) instead of our look fighting the scripted/intro camera (which reads
-  // the same heading globals).
-  if (!ge_mouselook_on() || LD32(base, GE_CAMERA_MODE) != GE_CAM_FP ||
-      LD32(base, GE_CUTSCENE) != 0) {
+  // --- Local-player scope (multiplayer) ---------------------------------------
+  // MP runs ge_bondview_control once per player view per frame, each with a
+  // different ge_bondview_cur. Only drive the local player's view (index 0) --
+  // otherwise the per-frame mouse delta is consumed by other views and g_look_bv
+  // resyncs every fire, which is the choppy online look. Return WITHOUT clearing
+  // g_look_bv so view 0's state survives the other views' fires. Single-player
+  // is always index 0, so this is a no-op there.
+  if (LD32(base, GE_VIEW_INDEX) != 0) return;
+
+  // Suspend mouse-look whenever the player isn't in first-person control (the
+  // intro fly-in / swirl / death / ending cameras read the same heading globals,
+  // so we must not fight them). Clear g_look_bv on block so the view re-syncs to
+  // the game's angle (no snap) when control returns.
+  // --- First-person gate (single-player AND online/split-screen multiplayer) --
+  // g_CameraMode is a SINGLE global that only the single-player camera state
+  // machine drives to 4 (FP playable). Online/split-screen multiplayer never
+  // sets it to 4, so the old `!= 4` test made this hook bail every frame in MP
+  // and mouse-look did nothing (GitHub issue #41 -- "online multiplayer mouse
+  // aiming does not work"). Keyboard + buttons worked because they don't go
+  // through this gate.
+  //
+  // Instead of requiring mode 4, BLOCK only the known non-playable single-player
+  // camera states: intro fly-in (1/2/3), swirl/cycle attract (5/6), the scripted
+  // camera (7) and the ending pose (9). Everything else -- SP gameplay (4) plus
+  // whatever value MP leaves it at -- counts as live first-person control. A
+  // mid-level scripted camera (gBondViewCutscene) still blocks.
+  const uint32_t cam_mode = LD32(base, GE_CAMERA_MODE);
+  const uint32_t cutscene = LD32(base, GE_CUTSCENE);
+  const bool cam_blocked = (cam_mode == 1 || cam_mode == 2 || cam_mode == 3 ||
+                            cam_mode == 5 || cam_mode == 6 || cam_mode == 7 ||
+                            cam_mode == 9);
+  // Diagnostic (~once/4s while mouse-look is on): confirms the real camera-mode
+  // value during online play so a single test pins it down. Cheap; harmless.
+  static uint32_t s_gate_diag = 0;
+  if (ge_mouselook_on() && (s_gate_diag++ & 0xFFu) == 0) {
+    REXKRNL_INFO("GEMOUSE gate cam_mode={} (sp_fp={}) cutscene={} blocked={}",
+                 cam_mode, cam_mode == GE_CAM_FP ? 1 : 0, cutscene,
+                 (cam_blocked || cutscene != 0) ? 1 : 0);
+  }
+  if (!ge_mouselook_on() || cam_blocked || cutscene != 0) {
     g_look_bv = 0;
     return;
   }
@@ -962,8 +1000,9 @@ void ge_tick_pitch(PPCRegister& /*r11*/) {
 void ge_pitch_hold(PPCRegister& /*r11*/) {
   if (!ge_mouselook_on() || !g_look_bv) return;
   PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  if (LD32(base, GE_VIEW_INDEX) != 0) return;  // local player's view only (MP)
   uint32_t bv = LD32(base, GE_BONDVIEW_CUR);
-  if (bv) STF32(base, bv + GE_BV_PITCH, g_look_pitch);
+  if (bv == g_look_bv) STF32(base, bv + GE_BV_PITCH, g_look_pitch);
 }
 
 // GE move-to-centre: ge_bondview_control @0x820bb460 sets field_104 (+524) = 1
@@ -974,9 +1013,15 @@ void ge_pitch_hold(PPCRegister& /*r11*/) {
 void ge_no_autolevel(PPCRegister& /*r11*/) {
   if (!ge_mouselook_on()) return;
   PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
-  // Only defeat auto-level while the player is in FP control; the intro fly-in
-  // (g_CameraMode 1/2/3) also runs ge_bondview_control via the cinema path.
-  if (LD32(base, GE_CAMERA_MODE) != GE_CAM_FP) return;
+  if (LD32(base, GE_VIEW_INDEX) != 0) return;  // local player's view only (MP)
+  // Only defeat auto-level while the player is in FP control. Mirror the
+  // ge_mouselook_pitch gate: block the single-player non-playable camera states
+  // (intro fly-in 1/2/3, swirl/cycle 5/6, scripted 7, ending 9) but allow SP
+  // gameplay (4) and whatever value multiplayer uses (issue #41).
+  const uint32_t cam_mode = LD32(base, GE_CAMERA_MODE);
+  if (cam_mode == 1 || cam_mode == 2 || cam_mode == 3 || cam_mode == 5 ||
+      cam_mode == 6 || cam_mode == 7 || cam_mode == 9)
+    return;
   if (LD32(base, GE_CUTSCENE) != 0) return;  // leave native behaviour in cutscenes
   uint32_t bv = LD32(base, GE_BONDVIEW_CUR);
   if (bv) ST32(base, bv + GE_BV_CENTER_FLAG, 0u);
