@@ -21,6 +21,10 @@
 #include <cstdlib>
 #include <string>
 
+// While the menu is waiting to capture a rebind key, ge_inject_keyboard swallows
+// all game input so the key being bound can't act. Implemented in ge_hooks.cpp.
+namespace ge { void SetRebindCapturing(bool); }
+
 namespace {
 
 // --- Small cvar accessors (the menu reads/writes settings by name) ---
@@ -102,6 +106,8 @@ constexpr KeyBind kBinds[] = {
     {"D-Pad Up", "ge_key_dup"},         {"D-Pad Down", "ge_key_ddown"},
     {"D-Pad Left", "ge_key_dleft"},     {"D-Pad Right", "ge_key_dright"},
     {"Start", "ge_key_start"},          {"Back", "ge_key_back"},
+    {"Look Up", "ge_key_look_up"},      {"Look Down", "ge_key_look_down"},
+    {"Look Left", "ge_key_look_left"},  {"Look Right", "ge_key_look_right"},
 };
 
 // Map an ImGui key to a Windows virtual-key code (== rex VirtualKey value).
@@ -157,7 +163,15 @@ int ImGuiKeyToVk(ImGuiKey k) {
 GeMenuDialog::GeMenuDialog(rex::ui::ImGuiDrawer* drawer, Callbacks callbacks)
     : rex::ui::ImGuiDialog(drawer), callbacks_(std::move(callbacks)) {}
 
-GeMenuDialog::~GeMenuDialog() = default;
+GeMenuDialog::~GeMenuDialog() {
+  // If the menu is torn down mid-capture, restore ImGui nav + unblock game input
+  // so neither stays disabled.
+  if (saved_nav_flags_ != 0xFFFFFFFFu) {
+    ImGui::GetIO().ConfigFlags |= static_cast<ImGuiConfigFlags>(saved_nav_flags_);
+    saved_nav_flags_ = 0xFFFFFFFFu;
+  }
+  ge::SetRebindCapturing(false);
+}
 
 void GeMenuDialog::RequestClose() { Close(); }
 
@@ -167,11 +181,14 @@ void GeMenuDialog::OnClose() {
 }
 
 void GeMenuDialog::OnDraw(ImGuiIO& io) {
-  // Keyboard tab navigation.
-  if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
-    selected_tab_ = (selected_tab_ - 1 + kTabCount) % kTabCount;
-  if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
-    selected_tab_ = (selected_tab_ + 1) % kTabCount;
+  // Keyboard tab navigation -- suppressed while a rebind is capturing, so the
+  // arrow keys you press to bind are listened for, not used to switch tabs.
+  if (!rebinding_cvar_) {
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+      selected_tab_ = (selected_tab_ - 1 + kTabCount) % kTabCount;
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+      selected_tab_ = (selected_tab_ + 1) % kTabCount;
+  }
 
   const ImVec2 disp = io.DisplaySize;
 
@@ -249,7 +266,10 @@ void GeMenuDialog::DrawTabs(ImGuiIO& /*io*/) {
     const float right = folder_right + tab_w_;
     const ImVec2 t0(left, ty0), t1(right, ty1);
 
-    if (ImGui::IsMouseHoveringRect(t0, t1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+    // Don't switch tabs on click while capturing -- a mouse click is being read
+    // as the bind (LMB/RMB/MMB) instead.
+    if (!rebinding_cvar_ &&
+        ImGui::IsMouseHoveringRect(t0, t1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
       selected_tab_ = i;
 
     // TEXTURE: tab (selected vs unselected).
@@ -656,7 +676,8 @@ void GeMenuDialog::DrawContent(ImGuiIO& /*io*/) {
       ImGui::Spacing();
 
       ImGui::TextColored(ImColor(kTitle), "REBIND KEYS");
-      ImGui::TextColored(ImColor(kInkDim), "(click a binding, then press the new key; Esc cancels)");
+      ImGui::TextColored(ImColor(kInkDim), "(click a binding, then press the new key; Esc cancels; right-click to unbind)");
+      ImGui::TextColored(ImColor(kInkDim), "(tip: bind multiple keys to one action by comma-separating them in ge.toml, e.g. W,Up)");
       ImGui::Spacing();
 
       const float btn_w = content_w * 0.34f;
@@ -672,6 +693,12 @@ void GeMenuDialog::DrawContent(ImGuiIO& /*io*/) {
         if (ImGui::Button(cur.c_str(), ImVec2(btn_w, 0))) {
           rebinding_cvar_ = b.cvar;
           rebind_skip_ = 1;  // ignore the click that started this rebind
+        }
+        // Right-click clears the binding (unbind).
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+          rex::cvar::SetFlagByName(b.cvar, "");
+          if (callbacks_.persist_config) callbacks_.persist_config();
+          if (rebinding_cvar_ == b.cvar) rebinding_cvar_ = nullptr;
         }
         ImGui::PopID();
       }
@@ -704,6 +731,25 @@ void GeMenuDialog::DrawContent(ImGuiIO& /*io*/) {
             }
             rebinding_cvar_ = nullptr;
           }
+        }
+      }
+      // Swallow all game input while a capture is pending (cleared the frame the
+      // key is captured / cancelled). ge_inject_keyboard reads this flag.
+      ge::SetRebindCapturing(rebinding_cvar_ != nullptr);
+      // Also disable ImGui keyboard/gamepad navigation while capturing, so the
+      // arrow / tab keys pressed to bind are captured here instead of switching
+      // tabs (which was cancelling the rebind). Restored when capture ends.
+      {
+        ImGuiIO& io = ImGui::GetIO();
+        const ImGuiConfigFlags nav =
+            ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+        if (rebinding_cvar_) {
+          if (saved_nav_flags_ == 0xFFFFFFFFu)
+            saved_nav_flags_ = static_cast<unsigned>(io.ConfigFlags & nav);
+          io.ConfigFlags &= ~nav;
+        } else if (saved_nav_flags_ != 0xFFFFFFFFu) {
+          io.ConfigFlags |= static_cast<ImGuiConfigFlags>(saved_nav_flags_);
+          saved_nav_flags_ = 0xFFFFFFFFu;
         }
       }
       break;

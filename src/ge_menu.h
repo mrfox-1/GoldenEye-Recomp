@@ -68,6 +68,10 @@ class GeMenuDialog : public rex::ui::ImGuiDialog {
   // and a one-frame guard so the click that starts a rebind isn't itself bound.
   const char* rebinding_cvar_ = nullptr;
   int rebind_skip_ = 0;
+  // ImGui nav flags saved while a rebind capture disables menu navigation (so
+  // arrow/tab keys are captured for the bind, not used to switch tabs). Sentinel
+  // 0xFFFFFFFF = nothing saved / not currently capturing.
+  unsigned saved_nav_flags_ = 0xFFFFFFFFu;
 
   // ONLINE tab edit state, loaded from the cvars the first time the tab shows
   // (so typing doesn't fight a per-frame reload). Applied on Save & Restart.

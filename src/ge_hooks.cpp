@@ -706,6 +706,10 @@ namespace {
 std::atomic<int> g_mouse_dx{0};
 std::atomic<int> g_mouse_dy{0};
 std::atomic<bool> g_mouselook_suppressed{false};  // set true while the pause menu is open
+// True while the rebind menu is waiting for a key. We must swallow ALL game input
+// (keyboard injection AND the real controller) so the key being bound doesn't also
+// act on the game/menu -- the menu only listens for the capture.
+std::atomic<bool> g_rebind_capturing{false};
 
 // Cursor-capture state (touched from the mouse thread + SetMouselookSuppressed).
 HWND g_game_hwnd = nullptr;
@@ -866,8 +870,16 @@ void SetMouselookSuppressed(bool v) {
   if (v) {  // drop any queued motion so closing the menu doesn't snap the view
     g_mouse_dx.store(0, std::memory_order_relaxed);
     g_mouse_dy.store(0, std::memory_order_relaxed);
+  } else {
+    g_rebind_capturing.store(false, std::memory_order_relaxed);  // never stick on close
   }
   ge_update_mouse_capture();  // release the cursor immediately when the menu opens
+}
+
+// Called by the rebind menu while it is waiting for a key. While true, all slot-0
+// controller input is swallowed (ge_inject_keyboard) so the bound key can't act.
+void SetRebindCapturing(bool v) {
+  g_rebind_capturing.store(v, std::memory_order_relaxed);
 }
 }  // namespace ge
 
@@ -914,7 +926,6 @@ void ge_mouse_camera(uint8_t* base) {
   const bool invert_x = REXCVAR_GET(ge_invert_x);
   const bool invert_y = REXCVAR_GET(ge_invert_y);
   const bool disable_autoaim = REXCVAR_GET(ge_disable_autoaim);
-  const float aim_turn_distance = static_cast<float>(REXCVAR_GET(ge_aim_turn_distance));
   const bool gun_sway = REXCVAR_GET(ge_gun_sway);
 
   // Consume this frame's raw mouse delta once; used for both menu and camera.
@@ -992,39 +1003,31 @@ void ge_mouse_camera(uint8_t* base) {
     prev_aim_mode = aim_mode;
   }
 
-  const float bounds = 1.f, dividor = 500.f, gun_multiplier = 1.f;
+  const float bounds = 1.f;
   const float crosshair_multiplier = 1.f, centering_multiplier = 1.f;
-  const float aim_turn_dividor = 1.f;
 
   if (aim_mode == 1) {
-    float chX = LDF32(base, player + GE_OFF_CH_X);
-    float chY = LDF32(base, player + GE_OFF_CH_Y);
-    chX += (invert_x ? -1.f : 1.f) * (mdx / dividor) * sensitivity;
-    chY += (invert_y ? -1.f : 1.f) * (mdy / dividor) * sensitivity;
-
-    chX = std::min(chX, bounds); chX = std::max(chX, -bounds);
-    chY = std::min(chY, bounds); chY = std::max(chY, -bounds);
-
-    STF32(base, player + GE_OFF_CH_X, chX);
-    STF32(base, player + GE_OFF_CH_Y, chY);
-    STF32(base, player + GE_OFF_GUN_X, chX * gun_multiplier);
-    STF32(base, player + GE_OFF_GUN_Y, chY * gun_multiplier);
-
-    // Turn the camera once the crosshair travels past a threshold.
-    float camX = LDF32(base, player + GE_OFF_CAM_X);
-    float camY = LDF32(base, player + GE_OFF_CAM_Y);
-    const float aim_multiplier = LDF32(base, player + GE_OFF_AIM_MULT);
-    const float ch_distance = sqrtf(chX * chX + chY * chY);
-    if (ch_distance > aim_turn_distance) {
-      camX += (chX / aim_turn_dividor) * aim_multiplier;
+    // #61: DIRECT 1:1 mouse aim. The old Xenia crosshair-travel mechanic moved a
+    // free crosshair and only turned the camera past a threshold; the game's
+    // native aim-mode auto-centering then sprang the crosshair/view back to the
+    // screen centre the instant the mouse stopped (the "snaps to middle" bug).
+    // Instead drive the camera straight from the mouse (same feel as hip-fire /
+    // v1.2.2) and hold the crosshair + gun centred, so there is nothing for the
+    // game to spring back to.
+    if (mdx != 0.f || mdy != 0.f) {
+      float camX = LDF32(base, player + GE_OFF_CAM_X);
+      float camY = LDF32(base, player + GE_OFF_CAM_Y);
+      camX += (invert_x ? -1.f : 1.f) * (mdx / 10.f) * sensitivity;
+      camY -= (invert_y ? -1.f : 1.f) * (mdy / 10.f) * sensitivity;
       STF32(base, player + GE_OFF_CAM_X, camX);
-      camY -= (chY / aim_turn_dividor) * aim_multiplier;
       STF32(base, player + GE_OFF_CAM_Y, camY);
     }
-
-    start_centering = true;
-    disable_sway = true;       // skip weapon sway until we've centered
-    centering_speed = 0.05f;   // speed up centering when leaving aim-mode
+    STF32(base, player + GE_OFF_CH_X, 0.f);
+    STF32(base, player + GE_OFF_CH_Y, 0.f);
+    STF32(base, player + GE_OFF_GUN_X, 0.f);
+    STF32(base, player + GE_OFF_GUN_Y, 0.f);
+    start_centering = false;   // nothing to centre -> no spring-back
+    disable_sway = false;
   } else {
     float gX = LDF32(base, player + GE_OFF_GUN_X);
     float gY = LDF32(base, player + GE_OFF_GUN_Y);
@@ -1115,14 +1118,29 @@ bool ge_input_active() {  // keyboard counts only when focused + not in the menu
   return !g_mouselook_suppressed.load(std::memory_order_relaxed) && ge_game_has_focus();
 }
 
-// Is the key currently bound to cvar `name` held down? Reads the bind by name,
-// parses it to a virtual key (== Windows VK code), and polls the async state.
+// Is any key bound to cvar `name` held down? The bind may list SEVERAL keys
+// separated by commas (#63 "multiple keys per function", e.g. "W,Up") -- held if
+// ANY of them is down. Each key name parses to a virtual key (== Windows VK code).
 bool ge_key_down(const char* name) {
-  std::string keyname = rex::cvar::GetFlagByName(name);
-  if (keyname.empty()) return false;
-  rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(keyname);
-  if (vk == rex::ui::VirtualKey::kNone) return false;
-  return (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
+  std::string binds = rex::cvar::GetFlagByName(name);
+  if (binds.empty()) return false;
+  size_t start = 0;
+  while (start <= binds.size()) {
+    size_t comma = binds.find(',', start);
+    std::string one = binds.substr(start, comma == std::string::npos
+                                              ? std::string::npos : comma - start);
+    while (!one.empty() && (one.front() == ' ' || one.front() == '\t')) one.erase(one.begin());
+    while (!one.empty() && (one.back() == ' ' || one.back() == '\t')) one.pop_back();
+    if (!one.empty()) {
+      rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(one);
+      if (vk != rex::ui::VirtualKey::kNone &&
+          (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0)
+        return true;
+    }
+    if (comma == std::string::npos) break;
+    start = comma + 1;
+  }
+  return false;
 }
 }  // namespace
 
@@ -1149,6 +1167,13 @@ REXCVAR_DEFINE_STRING(ge_key_dleft, "Left", "Input/Keybinds", "D-pad left");
 REXCVAR_DEFINE_STRING(ge_key_dright, "Right", "Input/Keybinds", "D-pad right");
 REXCVAR_DEFINE_STRING(ge_key_start, "Return", "Input/Keybinds", "Start button");
 REXCVAR_DEFINE_STRING(ge_key_back, "Tab", "Input/Keybinds", "Back button");
+// Right analog stick (look/aim) as keyboard binds (#63). Unbound by default so
+// they never fight mouse-look; bind them (e.g. arrow keys) for keyboard-only look.
+// They feed the guest's native right-stick, so they work alongside the mouse.
+REXCVAR_DEFINE_STRING(ge_key_look_up, "", "Input/Keybinds", "Look up (right stick up)");
+REXCVAR_DEFINE_STRING(ge_key_look_down, "", "Input/Keybinds", "Look down (right stick down)");
+REXCVAR_DEFINE_STRING(ge_key_look_left, "", "Input/Keybinds", "Look left (right stick left)");
+REXCVAR_DEFINE_STRING(ge_key_look_right, "", "Input/Keybinds", "Look right (right stick right)");
 
 // Runs once per controller poll, after XamInputGetState fills the slot-0 buffer
 // and before the guest dispatches it. OR our keyboard buttons in, and set the
@@ -1167,6 +1192,20 @@ void ge_inject_keyboard(PPCRegister& /*r11*/) {
     ce_patched = true;
     ge_apply_ce_data_patches(base);
     REXKRNL_INFO("GECE community data bug-fixes applied");
+  }
+
+  // Rebind capture: the menu is listening for a key to bind. Swallow ALL slot-0
+  // controller input (buttons, triggers, both sticks) so the key/button being
+  // bound doesn't also drive the game, and skip keyboard injection + mouse-look.
+  if (g_rebind_capturing.load(std::memory_order_relaxed)) {
+    ST16(base, GE_PAD0 + 0, 0);   // buttons
+    base[GE_PAD0 + 2] = 0;        // LT
+    base[GE_PAD0 + 3] = 0;        // RT
+    ST16(base, GE_PAD0 + 4, 0);   // LX
+    ST16(base, GE_PAD0 + 6, 0);   // LY
+    ST16(base, GE_PAD0 + 8, 0);   // RX
+    ST16(base, GE_PAD0 + 10, 0);  // RY
+    return;
   }
 
   // Mouse look runs every frame here, independent of the keyboard toggle. The
@@ -1204,6 +1243,16 @@ void ge_inject_keyboard(PPCRegister& /*r11*/) {
   if (ge_key_down("ge_key_mv_down")) ly = -32767;
   if (lx) ST16(base, GE_PAD0 + 4, static_cast<uint16_t>(lx));
   if (ly) ST16(base, GE_PAD0 + 6, static_cast<uint16_t>(ly));
+
+  // Right stick (look/aim) -> slot-0 gamepad RX(+8)/RY(+10), s16 BE (#63). Feeds
+  // the guest's native right-stick look, so it coexists with mouse-look.
+  int16_t rx = 0, ry = 0;
+  if (ge_key_down("ge_key_look_left")) rx = -32767;
+  if (ge_key_down("ge_key_look_right")) rx = 32767;
+  if (ge_key_down("ge_key_look_up")) ry = 32767;
+  if (ge_key_down("ge_key_look_down")) ry = -32767;
+  if (rx) ST16(base, GE_PAD0 + 8, static_cast<uint16_t>(rx));
+  if (ry) ST16(base, GE_PAD0 + 10, static_cast<uint16_t>(ry));
 }
 
 // ===========================================================================
