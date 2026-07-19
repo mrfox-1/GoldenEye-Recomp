@@ -32,6 +32,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <mmsystem.h>
 #include <shellapi.h>  // ShellExecuteW (WIN32_LEAN_AND_MEAN excludes it)
 #include <string>
 
@@ -913,6 +914,78 @@ enum GESettingFlag {
   GE_SET_AutoAim   = 0x10,
   GE_SET_LookAhead = 0x80,
 };
+
+// The leaked XBLA build contains the authentic watch cue in music.xwb, but the
+// N64 music script which switched to it was never wired into this version of
+// the game. Supply that missing transition from the same once-per-frame hook
+// which already tracks the watch state. The WAV is decoded from music.xwb entry
+// 33 ("21Goldeneye 64 - 007 Watch Theme") by the optional installer.
+void ge_set_guest_music_volume(PPCContext& source_ctx, uint8_t* base,
+                               uint8_t stored_volume) {
+  // sub_82144AD0 is the game's normal Music-category volume setter. Its input
+  // is the watch slider's 0..100 stored byte converted to the game's scale.
+  PPCContext call_ctx = source_ctx;
+  call_ctx.r3.u64 = static_cast<uint32_t>(stored_volume) * 128u;
+  sub_82144AD0(call_ctx, base);
+}
+
+std::wstring ge_watch_theme_path() {
+  wchar_t path[MAX_PATH]{};
+  DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+  if (!length || length >= MAX_PATH) return {};
+  std::wstring result(path, path + length);
+  size_t slash = result.find_last_of(L"\\/");
+  if (slash != std::wstring::npos) result.resize(slash + 1);
+  else result.clear();
+  result += L"watch_theme.wav";
+  return result;
+}
+
+void ge_watch_music_tick(PPCContext& ctx, uint8_t* base) {
+  static bool previous_watch_open = false;
+  static bool theme_playing = false;
+
+  // Select the active viewport's local player so this also works in multiplayer.
+  uint32_t player = 0;
+  for (int i = 0; i < 4; ++i) {
+    uint32_t candidate = LD32(base, GE_PLAYER_PTR + i * 4u);
+    if (candidate && LD32(base, candidate + 0x904u) == 0u) {
+      player = candidate;
+      break;
+    }
+  }
+  if (!player) player = LD32(base, GE_BONDVIEW_CUR);
+  if (!player) player = LD32(base, GE_PLAYER_PTR);
+
+  const bool watch_open = player && LD32(base, GE_PAUSE_FLAG) != 0u &&
+                          LD32(base, player + GE_OFF_WATCH) != 0u;
+  if (watch_open == previous_watch_open) return;
+  previous_watch_open = watch_open;
+
+  const uint32_t settings = LD32(base, GE_SETTINGS_PTR);
+  if (watch_open) {
+    const std::wstring path = ge_watch_theme_path();
+    theme_playing = !path.empty() &&
+                    PlaySoundW(path.c_str(), nullptr,
+                               SND_FILENAME | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+    if (theme_playing) {
+      // Apply a temporary live mute without changing the saved setting.
+      ge_set_guest_music_volume(ctx, base, 0);
+      REXKRNL_INFO("GEWATCHMUSIC started authentic watch cue");
+    } else {
+      REXKRNL_ERROR("GEWATCHMUSIC could not play watch_theme.wav");
+    }
+  } else {
+    if (theme_playing) {
+      PlaySoundW(nullptr, nullptr, 0);
+      theme_playing = false;
+    }
+    if (settings) {
+      ge_set_guest_music_volume(ctx, base, base[settings + 0x295u]);
+    }
+    REXKRNL_INFO("GEWATCHMUSIC stopped watch cue and restored level music");
+  }
+}
 }  // namespace
 
 void ge_mouse_camera(uint8_t* base) {
@@ -1182,7 +1255,7 @@ void ge_mouse_camera(uint8_t* base);  // defined above
 void ge_apply_ce_data_patches(uint8_t* base);  // ge_ce_patches.cpp
 
 void ge_inject_keyboard(PPCRegister& /*r11*/) {
-  PPCContext* ctx; uint8_t* base; getcb(ctx, base); (void)ctx;
+  PPCContext* ctx; uint8_t* base; getcb(ctx, base);
 
   // Apply BeanTools community DATA bug-fixes once, before any level loads its
   // setup/fog/BG data. The data segment is live in guest RAM by the first input
@@ -1193,6 +1266,10 @@ void ge_inject_keyboard(PPCRegister& /*r11*/) {
     ge_apply_ce_data_patches(base);
     REXKRNL_INFO("GECE community data bug-fixes applied");
   }
+
+  // Restore the missing XBLA watch-theme transition regardless of whether
+  // keyboard or mouse-look support is enabled.
+  ge_watch_music_tick(*ctx, base);
 
   // Rebind capture: the menu is listening for a key to bind. Swallow ALL slot-0
   // controller input (buttons, triggers, both sticks) so the key/button being
