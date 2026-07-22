@@ -39,8 +39,3 @@ endif()
 set_target_properties(ge PROPERTIES OUTPUT_NAME "GoldenEye")
 
 rexglue_setup_target(ge)
-
-if(WIN32)
-    # Play the restored watch cue without changing ReXGlue's audio path.
-    target_link_libraries(ge PRIVATE winmm)
-endif()
