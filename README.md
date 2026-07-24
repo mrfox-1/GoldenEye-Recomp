@@ -6,12 +6,15 @@ A native PC recompilation of the Xbox 360 version of GoldenEye 007.
 
 > [!IMPORTANT]
 > This community fork includes the native XACT audio repairs from
-> [upstream PR #114](https://github.com/SunJaycy/GoldenEye-Recomp/pull/114).
+> [upstream PR #114](https://github.com/SunJaycy/GoldenEye-Recomp/pull/114)
+> and the tank mouse-aim repair from
+> [upstream PR #116](https://github.com/SunJaycy/GoldenEye-Recomp/pull/116).
 > It restores the 007 watch theme, Mission Select music after missions, and
-> the Control/Caverns elevator tracks without extracted WAV files.
+> the Control/Caverns elevator tracks without extracted WAV files. It also
+> restores horizontal mouse aiming while driving the Runway tank.
 >
 > Windows 1.2.4 users can download the tested replacement executable from the
-> [GoldenEye Recomp Native XACT Music Fix v2.0.1 release](https://github.com/mrfox-1/GoldenEye-Recomp-Watch-Music-Fix/releases/tag/v2.0.1).
+> [GoldenEye Recomp Community Fixes v2.1.0 release](https://github.com/mrfox-1/GoldenEye-Recomp-Watch-Music-Fix/releases/tag/v2.1.0).
 
 ## A quick note
 
