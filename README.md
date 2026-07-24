@@ -11,7 +11,7 @@ A native PC recompilation of the Xbox 360 version of GoldenEye 007.
 > the Control/Caverns elevator tracks without extracted WAV files.
 >
 > Windows 1.2.4 users can download the tested replacement executable from the
-> [GoldenEye Recomp Native XACT Music Fix v2.0.0 release](https://github.com/mrfox-1/GoldenEye-Recomp-Watch-Music-Fix/releases/tag/v2.0.0).
+> [GoldenEye Recomp Native XACT Music Fix v2.0.1 release](https://github.com/mrfox-1/GoldenEye-Recomp-Watch-Music-Fix/releases/tag/v2.0.1).
 
 ## A quick note
 
